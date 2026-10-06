@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="session" content="__SESSION__">
+<title>voice-chat</title>
+<style>
+  :root {
+    --bg:#fafafa; --fg:#18181b; --muted:#71717a; --line:#e4e4e7; --field:#fff;
+    --accent:#18181b; --accent-fg:#fff; --ok:#16a34a; --bad:#dc2626;
+    --thumb:rgba(0,0,0,.18); --thumb-hi:rgba(0,0,0,.34);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0b0b0c; --fg:#ececee; --muted:#8b8b93; --line:#26262a; --field:#141416;
+            --accent:#ececee; --accent-fg:#0b0b0c; --ok:#4ade80; --bad:#f87171;
+            --thumb:rgba(255,255,255,.16); --thumb-hi:rgba(255,255,255,.32); }
+  }
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; }
+  main { height:100%; display:flex; flex-direction:column; }
+  .col { width:100%; max-width:640px; margin:0 auto; padding:0 16px; }
+  header { display:flex; align-items:center; gap:10px; padding-top:28px; padding-bottom:10px; }
+  h1 { font-size:15px; font-weight:600; margin:0; letter-spacing:.2px; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--line); }
+  .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); }
+  .muted { color:var(--muted); font-size:12px; }
+
+  /* Conversation: the scroll area spans the whole window (like ChatGPT / DeepSeek), so the bar sits
+     at the window edge, away from the messages. The native bar is hidden and replaced by a floating
+     overlay thumb: inset from the edge, translucent, only visible while scrolling or hovering. */
+  .scroll { position:relative; flex:1; min-height:0; }
+  #scroller { position:absolute; inset:0; overflow-y:auto; scrollbar-width:none;
+              mask-image:linear-gradient(transparent, #000 18px, #000 calc(100% - 18px), transparent); }
+  #scroller::-webkit-scrollbar { display:none; }
+  #log { min-height:100%; display:flex; flex-direction:column; gap:10px; padding-top:14px; padding-bottom:14px; }
+  #thumb { position:absolute; right:6px; top:0; width:6px; border-radius:6px; background:var(--thumb);
+           opacity:0; transition:opacity .35s, width .15s, background-color .15s; cursor:default;
+           backdrop-filter:blur(6px); }
+  .scroll.active #thumb, .scroll.near #thumb, #thumb.drag { opacity:1; transition:opacity .12s, width .15s, background-color .15s; }
+  .scroll.near #thumb, #thumb.drag { width:8px; right:5px; background:var(--thumb-hi); }
+
+  /* Message rail (a text-free timeline): one short bar per message, floating
+     in the empty area right of the conversation. Claude's bars hang left, the user's right, like the
+     bubbles. Bars near the middle of the view are bright and full length, farther ones fade and
+     shrink. Click a bar to jump to that message. When the rail is taller than ~60% of the view it is
+     clipped to that window, faded at both ends, and slides with the scroll position.
+     On narrow windows the overlay thumb is used instead. */
+  #rail { position:absolute; top:50%; left:calc(75% + 160px); transform:translate(-50%, -50%);
+          width:44px; overflow:hidden; user-select:none; touch-action:none; }
+  #rail.drag, #rail.drag button { cursor:grabbing; }
+  #rail.over { mask-image:linear-gradient(transparent, #000 22%, #000 78%, transparent); }
+  #railInner { display:flex; flex-direction:column; will-change:transform; }
+  #rail button { all:unset; display:flex; height:18px; align-items:center; cursor:pointer; }
+  #rail button.user { justify-content:flex-end; }
+  #rail i { display:block; height:5px; border-radius:0; background:var(--fg); opacity:.4;
+            transition:opacity .25s, transform .25s, height .15s; }
+  #rail button.claude i { transform-origin:left center; }
+  #rail button.user i { transform-origin:right center; }
+  #rail button:hover i { opacity:1 !important; height:6px; }
+  #thumb { display:none; }
+  @media (max-width: 860px) { #rail { display:none; } #thumb { display:block; } }
+
+  .msg { max-width:85%; padding:9px 13px; border-radius:12px; white-space:pre-wrap; word-break:break-word; }
+  .msg.user { align-self:flex-end; background:var(--accent); color:var(--accent-fg); border-bottom-right-radius:4px; }
+  .msg.claude { align-self:flex-start; background:var(--field); border:1px solid var(--line); border-bottom-left-radius:4px; }
+  #empty { margin:auto; text-align:center; }
+  footer { display:flex; flex-direction:column; align-items:center; gap:8px; padding-top:10px; padding-bottom:24px; }
+  #mic { width:64px; height:64px; border-radius:50%; border:1px solid var(--line); background:var(--field);
+         color:var(--fg); cursor:pointer; display:grid; place-items:center; transition:transform .1s; }
+  #mic:hover { border-color:var(--muted); }
+  #mic:active { transform:scale(.96); }
+  #mic.rec { background:var(--bad); border-color:var(--bad); color:#fff; animation:pulse 1.4s ease-in-out infinite; }
+  #mic:disabled { opacity:.45; cursor:default; animation:none; }
+  @keyframes pulse { 50% { box-shadow:0 0 0 10px color-mix(in srgb, var(--bad) 18%, transparent); } }
+  #msg { min-height:20px; font-size:13px; color:var(--muted); }
+  #msg.err { color:var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <header class="col">
+    <span id="dot" class="dot" title="Claude 是否在听"></span>
+    <h1>voice-chat</h1>
+    <span id="link" class="muted"></span>
+  </header>
+
+  <div class="scroll" id="scroll">
+    <div id="scroller">
+      <div id="log" class="col"><span id="empty" class="muted">点下面的麦克风开始说话，再点一次结束。<br>空格键也可以。</span></div>
+    </div>
+    <div id="thumb"></div>
+    <nav id="rail"><div id="railInner"></div></nav>
+  </div>
+
+  <footer class="col">
+    <button id="mic" title="开始 / 结束录音（空格）">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/>
+        <path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+    </button>
+    <div id="msg"></div>
+  </footer>
+</main>
+
+<script>
+const SESSION = document.querySelector('meta[name=session]').content;
+const $ = s => document.querySelector(s);
+const H = { "X-Session": SESSION };
+
+function say(text, err) { const m = $("#msg"); m.textContent = text || ""; m.className = err ? "err" : ""; }
+
+// ---- floating scrollbar
+const scroll = $("#scroll"), sc = $("#scroller"), thumb = $("#thumb");
+const INSET = 8, MIN_H = 36;
+let fade = null;
+function layoutThumb() {
+  const ch = sc.clientHeight, sh = sc.scrollHeight;
+  thumb.hidden = sh <= ch + 1;
+  if (thumb.hidden) return;
+  const track = ch - INSET * 2;
+  const h = Math.max(MIN_H, track * ch / sh);
+  thumb.style.height = h + "px";
+  thumb.style.top = INSET + (track - h) * sc.scrollTop / (sh - ch) + "px";
+}
+function flash() {
+  scroll.classList.add("active"); clearTimeout(fade);
+  fade = setTimeout(() => scroll.classList.remove("active"), 900);
+}
+// ---- message rail
+const rail = $("#rail"), railInner = $("#railInner"), marks = [];   // [{ el: message div, i: bar }]
+const PITCH = 18;
+function addMark(d, m) {
+  const b = document.createElement("button");
+  b.className = m.role; b.title = "";
+  const i = document.createElement("i");
+  i.style.width = Math.round(14 + Math.min(28, Math.sqrt(m.text.length) * 2)) + "px";
+  b.appendChild(i);
+  b.addEventListener("click", () => {
+    if (railDragged) { railDragged = false; return; }
+    d.scrollIntoView({ behavior: "smooth", block: "center" });
+  });
+  railInner.appendChild(b);
+  marks.push({ el: d, i });
+}
+let railFrame = 0;
+function updateRail() {
+  railFrame = 0;
+  const ch = sc.clientHeight, vc = sc.scrollTop + ch / 2;
+  const full = marks.length * PITCH, win = Math.round(ch * 0.6), over = full > win;
+  rail.style.height = (over ? win : full) + "px";
+  rail.classList.toggle("over", over);
+  const progress = sc.scrollHeight > ch ? sc.scrollTop / (sc.scrollHeight - ch) : 0;
+  // Pad by the fade height so the first / last bar can still reach the solid middle band.
+  const pad = over ? Math.round(win * 0.22) : 0;
+  railInner.style.padding = pad + "px 0";
+  railInner.style.transform = over ? `translateY(${(-progress * (full + 2 * pad - win)).toFixed(1)}px)` : "";
+  for (const { el, i } of marks) {
+    const t = Math.min(1, Math.abs(el.offsetTop + el.offsetHeight / 2 - vc) / (ch * 0.55));
+    i.style.opacity = (1 - 0.6 * t).toFixed(3);
+    i.style.transform = `scaleX(${(1 - 0.4 * t).toFixed(3)})`;
+  }
+}
+const railSoon = () => { if (!railFrame) railFrame = requestAnimationFrame(updateRail); };
+
+// Rail drag: a quick tap on a bar jumps to that message; holding (~250 ms) or moving starts a drag
+// that scrolls the conversation like a scrollbar (the rail's visible height = the whole conversation).
+let railDrag = null, railDragged = false;
+function railStartDrag() {
+  if (!railDrag || railDrag.active) return;
+  railDrag.active = true; railDragged = true;
+  rail.setPointerCapture(railDrag.id); rail.classList.add("drag");
+}
+rail.addEventListener("pointerdown", e => {
+  if (e.button !== 0) return;
+  railDragged = false;
+  railDrag = { id: e.pointerId, y: e.clientY, top: sc.scrollTop, active: false,
+               hold: setTimeout(railStartDrag, 250) };
+});
+rail.addEventListener("pointermove", e => {
+  if (!railDrag) return;
+  if (!railDrag.active && Math.abs(e.clientY - railDrag.y) > 4) railStartDrag();
+  if (railDrag.active) {
+    const ratio = (sc.scrollHeight - sc.clientHeight) / Math.max(1, rail.clientHeight);
+    sc.scrollTop = railDrag.top + (e.clientY - railDrag.y) * ratio;
+  }
+});
+const railEndDrag = () => {
+  if (!railDrag) return;
+  clearTimeout(railDrag.hold);
+  rail.classList.remove("drag");
+  railDrag = null;
+};
+rail.addEventListener("pointerup", railEndDrag);
+rail.addEventListener("pointercancel", railEndDrag);
+
+sc.addEventListener("scroll", () => { layoutThumb(); flash(); railSoon(); }, { passive: true });
+new ResizeObserver(() => { layoutThumb(); railSoon(); }).observe(sc);
+new ResizeObserver(() => { layoutThumb(); railSoon(); }).observe($("#log"));
+// Wider and brighter when the pointer comes near the right edge.
+scroll.addEventListener("pointermove", e => {
+  const r = scroll.getBoundingClientRect();
+  scroll.classList.toggle("near", r.right - e.clientX < 24);
+});
+scroll.addEventListener("pointerleave", () => scroll.classList.remove("near"));
+thumb.addEventListener("pointerdown", e => {
+  e.preventDefault(); thumb.setPointerCapture(e.pointerId); thumb.classList.add("drag");
+  const y0 = e.clientY, top0 = sc.scrollTop;
+  const ratio = (sc.scrollHeight - sc.clientHeight) / (sc.clientHeight - INSET * 2 - thumb.offsetHeight);
+  const move = ev => { sc.scrollTop = top0 + (ev.clientY - y0) * ratio; };
+  const up = () => { thumb.classList.remove("drag"); thumb.removeEventListener("pointermove", move); };
+  thumb.addEventListener("pointermove", move);
+  thumb.addEventListener("pointerup", up, { once: true });
+});
+
+// ---- conversation (long poll)
+let lastId = 0, waiting = false;
+function show(m) {
+  $("#empty")?.remove();
+  const d = document.createElement("div");
+  d.className = "msg " + m.role; d.textContent = m.text;
+  $("#log").appendChild(d);
+  addMark(d, m);
+  sc.scrollTo({ top: sc.scrollHeight, behavior: "smooth" });
+  lastId = m.id; waiting = m.role === "user";
+}
+function status(listening, queued) {
+  $("#dot").className = "dot " + (listening ? "ok" : "bad");
+  $("#link").textContent = listening ? "Claude 在听" : queued ? `Claude 没在听 · ${queued} 条待读` : "Claude 没在听";
+  if (!rec && !busy) say(waiting ? (listening ? "Claude 思考中…" : "已排队，等 Claude 回来读") : "");
+}
+async function poll() {
+  for (;;) {
+    try {
+      const r = await fetch("/api/poll?after=" + lastId, { headers: H });
+      if (!r.ok) throw new Error(r.status);
+      const d = await r.json();
+      d.messages.forEach(show);
+      status(d.listening, d.queued);
+    } catch { status(false, 0); say("连不上本地服务（voice.py 没在跑？）", true); await new Promise(r => setTimeout(r, 3000)); }
+  }
+}
+
+// ---- recording: click to start, click again to stop → transcribe
+let rec = null, chunks = [], busy = false, started = 0, timer = null;
+async function toggle() {
+  if (busy) return;
+  if (rec) { rec.stop(); return; }
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch (e) { say("拿不到麦克风：" + e.message, true); return; }
+  chunks = [];
+  rec = new MediaRecorder(stream);
+  rec.ondataavailable = e => e.data.size && chunks.push(e.data);
+  rec.onstop = () => { stream.getTracks().forEach(t => t.stop()); clearInterval(timer); send(); };
+  rec.start();
+  started = Date.now();
+  $("#mic").classList.add("rec");
+  const tick = () => say("录音中 " + Math.floor((Date.now() - started) / 1000) + " 秒 · 再点一次结束");
+  tick(); timer = setInterval(tick, 500);
+}
+async function send() {
+  const type = rec.mimeType || "audio/webm";
+  rec = null; $("#mic").classList.remove("rec");
+  const blob = new Blob(chunks, { type });
+  if (Date.now() - started < 400 || !blob.size) { say("太短了"); return; }
+  busy = true; $("#mic").disabled = true; say("转写中…");
+  try {
+    const r = await fetch("/api/audio", { method: "POST", headers: { ...H, "Content-Type": type }, body: blob });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || r.statusText);
+    say("");
+  } catch (e) { say(e.message, true); }
+  finally { busy = false; $("#mic").disabled = false; }
+}
+$("#mic").addEventListener("click", toggle);
+document.addEventListener("keydown", e => {
+  if (e.code === "Space" && !e.repeat && e.target === document.body) { e.preventDefault(); toggle(); }
+});
+document.addEventListener("keyup", e => { if (e.code === "Space") e.preventDefault(); });
+$("#mic").addEventListener("keydown", e => { if (e.code === "Space") { e.preventDefault(); if (!e.repeat) toggle(); } });
+
+fetch("/api/poll?now=1", { headers: H }).then(r => r.json()).then(d => { d.messages.forEach(show); status(d.listening, d.queued); poll(); });
+</script>
+</body>
+</html>

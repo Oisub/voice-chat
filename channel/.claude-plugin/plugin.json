@@ -1,0 +1,5 @@
+{
+  "name": "voice",
+  "version": "0.1.1",
+  "description": "Channel that pushes voice-chat utterances into the Claude Code session"
+}
