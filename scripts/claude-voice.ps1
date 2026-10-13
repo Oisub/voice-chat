@@ -1,4 +1,4 @@
-# Start a voice session: bring up the voice-chat page, then start Claude Code with the voice channel.
+# Start a voice session: bring up the voice-chat server and floating ball, then start Claude Code with the voice channel.
 # Run it from the folder Claude Code should work in; extra arguments go to claude (e.g. `-c`).
 #   powershell -ExecutionPolicy Bypass -File <repo>\scripts\claude-voice.ps1 [-c]
 
@@ -8,18 +8,16 @@ function Test-VoicePort {
     try { $c = New-Object System.Net.Sockets.TcpClient; $c.Connect('127.0.0.1', 8766); $c.Close(); return $true } catch { return $false }
 }
 
-# Start the server first so the page is up while Claude Code is still loading.
+# Start the server first so it is up while Claude Code is still loading.
 if (-not (Test-VoicePort)) {
     $log = "$env:APPDATA\voice-chat"
     New-Item -ItemType Directory -Force $log | Out-Null
-    Start-Process uv -ArgumentList 'run', 'voice.py', '--no-browser' -WorkingDirectory $repo `
+    Start-Process uv -ArgumentList 'run', 'voice.py', '--no-ball' -WorkingDirectory $repo `
         -WindowStyle Hidden -RedirectStandardOutput "$log\server.out.log" -RedirectStandardError "$log\server.err.log"
     for ($i = 0; $i -lt 30 -and -not (Test-VoicePort); $i++) { Start-Sleep -Milliseconds 500 }
 }
-# The page is opened from here, not by voice.py: a hidden background process may not bring the
-# browser to the foreground, while this console can. If the server was already up, this just
-# brings the page back.
-Start-Process 'http://127.0.0.1:8766'
+# Show the floating mic ball. Only one ball runs at a time, so this is safe when it is already up.
+Start-Process uv -ArgumentList 'run', 'ball.pyw' -WorkingDirectory $repo -WindowStyle Hidden
 
 # The channel server only takes utterances off voice.py's queue in sessions started this way.
 $env:VOICE_SERVER_LAUNCHED = '1'
